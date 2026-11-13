@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import 'home_screen.dart';
 import '../services/file_service.dart';
 
@@ -17,9 +18,12 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   Future<void> _initialize() async {
-    await Future.delayed(const Duration(seconds: 2));
-
-    final hasPermission = await FileService.requestStoragePermission();
+    bool hasPermission;
+    try {
+      hasPermission = await FileService.requestStoragePermission();
+    } catch (_) {
+      hasPermission = false;
+    }
 
     if (mounted) {
       if (hasPermission) {
@@ -43,10 +47,6 @@ class _SplashScreenState extends State<SplashScreen> {
           'File Organizer needs storage permission to manage your files. Please grant permission in settings.',
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Exit'),
-          ),
           ElevatedButton(
             onPressed: () {
               Navigator.pop(context);
@@ -92,15 +92,10 @@ class _SplashScreenState extends State<SplashScreen> {
             const SizedBox(height: 8),
             const Text(
               'Organize at Lightning Speed',
-              style: TextStyle(
-                color: Colors.white70,
-                fontSize: 16,
-              ),
+              style: TextStyle(color: Colors.white70, fontSize: 16),
             ),
             const SizedBox(height: 48),
-            const CircularProgressIndicator(
-              color: Colors.white,
-            ),
+            const CircularProgressIndicator(color: Colors.white),
           ],
         ),
       ),

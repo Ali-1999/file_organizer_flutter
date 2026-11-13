@@ -1,14 +1,6 @@
 import 'dart:io';
 
-enum FileType {
-  folder,
-  image,
-  video,
-  audio,
-  document,
-  pdf,
-  other,
-}
+enum FileType { folder, image, video, audio, document, pdf, other }
 
 class FileItem {
   final String path;
@@ -44,21 +36,37 @@ class FileItem {
   static FileType getFileType(String path) {
     final ext = path.toLowerCase();
     if (FileSystemEntity.isDirectorySync(path)) return FileType.folder;
-    if (ext.endsWith('.jpg') || ext.endsWith('.jpeg') || ext.endsWith('.png') || 
-        ext.endsWith('.gif') || ext.endsWith('.webp') || ext.endsWith('.bmp')) {
+    if (ext.endsWith('.jpg') ||
+        ext.endsWith('.jpeg') ||
+        ext.endsWith('.png') ||
+        ext.endsWith('.gif') ||
+        ext.endsWith('.webp') ||
+        ext.endsWith('.bmp')) {
       return FileType.image;
     }
-    if (ext.endsWith('.mp4') || ext.endsWith('.avi') || ext.endsWith('.mkv') || 
-        ext.endsWith('.mov') || ext.endsWith('.wmv') || ext.endsWith('.flv')) {
+    if (ext.endsWith('.mp4') ||
+        ext.endsWith('.avi') ||
+        ext.endsWith('.mkv') ||
+        ext.endsWith('.mov') ||
+        ext.endsWith('.wmv') ||
+        ext.endsWith('.flv')) {
       return FileType.video;
     }
-    if (ext.endsWith('.mp3') || ext.endsWith('.wav') || ext.endsWith('.aac') || 
-        ext.endsWith('.flac') || ext.endsWith('.m4a') || ext.endsWith('.ogg')) {
+    if (ext.endsWith('.mp3') ||
+        ext.endsWith('.wav') ||
+        ext.endsWith('.aac') ||
+        ext.endsWith('.flac') ||
+        ext.endsWith('.m4a') ||
+        ext.endsWith('.ogg')) {
       return FileType.audio;
     }
     if (ext.endsWith('.pdf')) return FileType.pdf;
-    if (ext.endsWith('.doc') || ext.endsWith('.docx') || ext.endsWith('.txt') || 
-        ext.endsWith('.xls') || ext.endsWith('.xlsx') || ext.endsWith('.ppt') || 
+    if (ext.endsWith('.doc') ||
+        ext.endsWith('.docx') ||
+        ext.endsWith('.txt') ||
+        ext.endsWith('.xls') ||
+        ext.endsWith('.xlsx') ||
+        ext.endsWith('.ppt') ||
         ext.endsWith('.pptx')) {
       return FileType.document;
     }
@@ -69,7 +77,8 @@ class FileItem {
     if (size == null) return '';
     if (size! < 1024) return '${size}B';
     if (size! < 1024 * 1024) return '${(size! / 1024).toStringAsFixed(1)}KB';
-    if (size! < 1024 * 1024 * 1024) return '${(size! / (1024 * 1024)).toStringAsFixed(1)}MB';
+    if (size! < 1024 * 1024 * 1024)
+      return '${(size! / (1024 * 1024)).toStringAsFixed(1)}MB';
     return '${(size! / (1024 * 1024 * 1024)).toStringAsFixed(1)}GB';
   }
 }

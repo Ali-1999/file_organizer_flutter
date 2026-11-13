@@ -1,5 +1,10 @@
 import 'dart:io';
+
+import 'package:file_picker/file_picker.dart' show FilePicker;
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../models/file_item.dart';
 import '../services/file_service.dart';
 
@@ -11,247 +16,362 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  String currentPath = '';
-  List<FileItem> files = [];
-  List<DestinationFolder> destinations = [];
-  Set<int> selectedIndices = {};
-  bool isLoading = true;
-  bool organizerMode = true;
-  String? toastMessage;
-  bool showToast = false;
+  final _selected = <String>{};
+  final _undo = <List<FileMove>>[];
+  final _redo = <List<FileMove>>[];
+  final _sourceScroll = ScrollController();
+  List<FileItem> _files = [];
+  List<DestinationFolder> _destinations = [];
+  String _root = '';
+  String _path = '';
+  String _sourceQuery = '';
+  String _destinationQuery = '';
+  String? _error;
+  bool _busy = true;
 
   @override
   void initState() {
     super.initState();
-    _loadInitialData();
-  }
-
-  Future<void> _loadInitialData() async {
-    final path = await FileService.getInitialDirectory();
-    if (path != null) {
-      await _loadDirectory(path);
-      await _loadDestinations();
-    }
-  }
-
-  Future<void> _loadDirectory(String path) async {
-    setState(() => isLoading = true);
-    final items = await FileService.getFilesInDirectory(path);
-    setState(() {
-      currentPath = path;
-      files = items;
-      selectedIndices.clear();
-      isLoading = false;
-    });
-  }
-
-  Future<void> _loadDestinations() async {
-    final dests = await FileService.getCommonDestinations();
-    setState(() {
-      destinations = dests;
-    });
-  }
-
-  void _toggleSelection(int index) {
-    setState(() {
-      if (selectedIndices.contains(index)) {
-        selectedIndices.remove(index);
-      } else {
-        selectedIndices.add(index);
-      }
-    });
-  }
-
-  void _clearSelection() {
-    setState(() => selectedIndices.clear());
-  }
-
-  Future<void> _moveToDestination(String destPath, String destName) async {
-    if (selectedIndices.isEmpty) {
-      _showToast('Select files first!');
-      return;
-    }
-
-    final pathsToMove = selectedIndices.map((i) => files[i].path).toList();
-    final success = await FileService.moveFiles(pathsToMove, destPath);
-
-    if (success) {
-      _showToast('Moved ${selectedIndices.length} file(s) to $destName');
-      // Reload current directory but keep position
-      await _loadDirectory(currentPath);
-    } else {
-      _showToast('Failed to move files');
-    }
-  }
-
-  void _showToast(String message) {
-    setState(() {
-      toastMessage = message;
-      showToast = true;
-    });
-    Future.delayed(const Duration(seconds: 2), () {
-      if (mounted) {
-        setState(() => showToast = false);
-      }
-    });
-  }
-
-  void _navigateToFolder(String path) {
-    _loadDirectory(path);
-  }
-
-  void _goBack() {
-    final parent = Directory(currentPath).parent.path;
-    if (parent != currentPath) {
-      _loadDirectory(parent);
-    }
-  }
-
-  String _getBreadcrumb() {
-    final parts = currentPath.split('/');
-    if (parts.length <= 3) return currentPath;
-    return '.../${parts.sublist(parts.length - 3).join(' > ')}';
-  }
-
-  IconData _getFileIcon(FileType type) {
-    switch (type) {
-      case FileType.folder:
-        return Icons.folder;
-      case FileType.image:
-        return Icons.image;
-      case FileType.video:
-        return Icons.videocam;
-      case FileType.audio:
-        return Icons.music_note;
-      case FileType.pdf:
-        return Icons.picture_as_pdf;
-      case FileType.document:
-        return Icons.description;
-      default:
-        return Icons.insert_drive_file;
-    }
-  }
-
-  Color _getFileColor(FileType type) {
-    switch (type) {
-      case FileType.folder:
-        return const Color(0xFFFFA726);
-      case FileType.image:
-        return const Color(0xFF66BB6A);
-      case FileType.video:
-        return const Color(0xFFEF5350);
-      case FileType.audio:
-        return const Color(0xFFAB47BC);
-      case FileType.pdf:
-        return const Color(0xFFEF5350);
-      case FileType.document:
-        return const Color(0xFF42A5F5);
-      default:
-        return Colors.grey;
-    }
+    _initialise();
   }
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Stack(
-        children: [
-          Column(
-            children: [
-              // App Bar
-              _buildAppBar(),
-              // Selection Bar
-              if (selectedIndices.isNotEmpty) _buildSelectionBar(),
-              // Main Content
-              Expanded(
-                child: Row(
-                  children: [
-                    // Source Pane
-                    Expanded(
-                      flex: 13,
-                      child: _buildSourcePane(),
-                    ),
-                    // Divider
-                    Container(
-                      width: 2,
-                      color: Colors.grey.shade300,
-                    ),
-                    // Destination Pane
-                    Expanded(
-                      flex: 7,
-                      child: _buildDestinationPane(),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+  void dispose() {
+    _sourceScroll.dispose();
+    super.dispose();
+  }
+
+  Future<void> _initialise() async {
+    try {
+      final root = await FileService.getInitialDirectory();
+      final preferences = await SharedPreferences.getInstance();
+      final defaults = await FileService.getCommonDestinations(root);
+      final destinations = {for (final folder in defaults) folder.path: folder};
+      for (final path
+          in preferences.getStringList('destinations') ?? <String>[]) {
+        if (await Directory(path).exists()) {
+          destinations[path] = DestinationFolder(
+            path: path,
+            name: p.basename(path),
+          );
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        _root = root;
+        _destinations = destinations.values.toList();
+      });
+      final saved = preferences.getString('source');
+      await _load(
+        saved != null && await Directory(saved).exists() ? saved : root,
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Could not access storage. Check the app storage permission.';
+        _busy = false;
+      });
+    }
+  }
+
+  Future<void> _load(String path, {bool refresh = false}) async {
+    if (!mounted) return;
+    setState(() => _busy = true);
+    try {
+      final files = await FileService.getFilesInDirectory(path);
+      if (!mounted) return;
+      setState(() {
+        _path = path;
+        _files = files;
+        _error = null;
+        if (!refresh) _selected.clear();
+        final existing = files.map((file) => file.path).toSet();
+        _selected.retainAll(existing);
+      });
+      if (!refresh && _sourceScroll.hasClients) _sourceScroll.jumpTo(0);
+    } on FileSystemException {
+      if (mounted) setState(() => _error = 'Could not read $path');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _chooseFolder({required bool destination}) async {
+    setState(() => _busy = true);
+    try {
+      final path = await FilePicker.platform.getDirectoryPath();
+      if (path == null || !mounted) return;
+      final preferences = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      if (destination) {
+        if (_destinations.any((folder) => folder.path == path)) return;
+        final saved = preferences.getStringList('destinations') ?? <String>[];
+        await preferences.setStringList('destinations', [...saved, path]);
+        if (!mounted) return;
+        setState(
+          () => _destinations.add(
+            DestinationFolder(path: path, name: p.basename(path)),
           ),
-          // Toast
-          if (showToast) _buildToast(),
+        );
+      } else {
+        await _load(path);
+        if (_path == path) await preferences.setString('source', path);
+      }
+    } catch (_) {
+      _notice('Could not use that folder.');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _move(DestinationFolder folder, [String? dragged]) async {
+    if (_busy) return;
+    final paths = dragged != null && !_selected.contains(dragged)
+        ? [dragged]
+        : _selected.toList();
+    if (paths.isEmpty) {
+      _notice('Select files first.');
+      return;
+    }
+    setState(() => _busy = true);
+    final moved = <FileMove>[];
+    for (final path in paths) {
+      try {
+        moved.add(await FileService.move(path, folder.path));
+      } on FileSystemException {
+        // Continue with the rest of the batch and report the failure count.
+      }
+    }
+    if (!mounted) return;
+    if (moved.isNotEmpty) {
+      _undo.add(moved);
+      _redo.clear();
+      _selected.removeAll(moved.map((move) => move.from));
+    }
+    final failed = paths.length - moved.length;
+    _notice(
+      'Moved ${moved.length} to ${folder.name}'
+      '${failed == 0 ? '.' : ' · $failed failed.'}',
+    );
+    await _load(_path, refresh: true);
+  }
+
+  Future<void> _replay({required bool undo}) async {
+    final pending = undo ? _undo : _redo;
+    final completed = undo ? _redo : _undo;
+    if (_busy || pending.isEmpty) return;
+    setState(() => _busy = true);
+    final batch = pending.removeLast();
+    final succeeded = <FileMove>[];
+    final failed = <FileMove>[];
+    for (final move in batch) {
+      try {
+        await FileService.moveToExactPath(
+          undo ? move.to : move.from,
+          undo ? move.from : move.to,
+        );
+        succeeded.add(move);
+      } on FileSystemException {
+        failed.add(move);
+      }
+    }
+    if (failed.isNotEmpty) pending.add(failed);
+    if (succeeded.isNotEmpty) completed.add(succeeded);
+    if (!mounted) return;
+    _notice(
+      '${undo ? 'Undid' : 'Redid'} ${succeeded.length} move(s)'
+      '${failed.isEmpty ? '.' : ' · ${failed.length} failed.'}',
+    );
+    await _load(_path, refresh: true);
+  }
+
+  void _notice(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
+      );
+  }
+
+  void _preview(FileItem file) {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(file.name),
+        content: file.type == FileType.image
+            ? Image.file(
+                File(file.path),
+                errorBuilder: (_, _, _) => const Text('Preview unavailable'),
+              )
+            : Text(
+                '${file.path}\n\n${file.size ?? 0} bytes\n${file.modifiedDate ?? ''}',
+              ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildAppBar() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border(
-          bottom: BorderSide(color: Colors.grey.shade300),
+  IconData _icon(FileType type) => switch (type) {
+    FileType.folder => Icons.folder,
+    FileType.image => Icons.image,
+    FileType.video => Icons.videocam,
+    FileType.audio => Icons.music_note,
+    FileType.pdf => Icons.picture_as_pdf,
+    _ => Icons.insert_drive_file,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final source = _files
+        .where((file) => file.name.toLowerCase().contains(_sourceQuery))
+        .toList();
+    final destinations = _destinations.where(
+      (folder) => folder.name.toLowerCase().contains(_destinationQuery),
+    );
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(_path.isEmpty ? 'File Organizer' : p.basename(_path)),
+        leading: IconButton(
+          tooltip: 'Parent folder',
+          icon: const Icon(Icons.arrow_upward),
+          onPressed:
+              _busy ||
+                  _path.isEmpty ||
+                  _path == _root ||
+                  p.dirname(_path) == _path
+              ? null
+              : () => _load(p.dirname(_path)),
         ),
-      ),
-      child: SafeArea(
-        bottom: false,
-        child: Row(
-          children: [
-            IconButton(
-              icon: const Icon(Icons.arrow_back),
-              onPressed: _goBack,
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                _getBreadcrumb(),
-                style: TextStyle(
-                  fontSize: 14,
-                  color: Colors.grey.shade600,
-                ),
-                overflow: TextOverflow.ellipsis,
+        actions: [
+          IconButton(
+            tooltip: 'Undo move',
+            onPressed: _busy || _undo.isEmpty
+                ? null
+                : () => _replay(undo: true),
+            icon: const Icon(Icons.undo),
+          ),
+          IconButton(
+            tooltip: 'Redo move',
+            onPressed: _busy || _redo.isEmpty
+                ? null
+                : () => _replay(undo: false),
+            icon: const Icon(Icons.redo),
+          ),
+          PopupMenuButton<String>(
+            enabled: !_busy,
+            onSelected: (action) => switch (action) {
+              'source' => _chooseFolder(destination: false),
+              'root' => _root.isEmpty ? _initialise() : _load(_root),
+              _ => _path.isEmpty ? _initialise() : _load(_path, refresh: true),
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: 'source',
+                child: Text('Choose source folder'),
               ),
-            ),
-            IconButton(
-              icon: const Icon(Icons.search),
-              onPressed: () {},
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(),
-            ),
-            IconButton(
-              icon: const Icon(Icons.undo),
-              onPressed: () {},
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(),
-            ),
-            IconButton(
-              icon: const Icon(Icons.redo),
-              onPressed: () {},
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(),
-            ),
-            IconButton(
-              icon: const Icon(Icons.menu),
-              onPressed: () {},
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(),
-            ),
-            IconButton(
-              icon: const Icon(Icons.more_vert),
-              onPressed: () {},
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(),
+              PopupMenuItem(value: 'root', child: Text('Go to storage root')),
+              PopupMenuItem(value: 'refresh', child: Text('Refresh')),
+            ],
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Column(
+          children: [
+            if (_busy)
+              const LinearProgressIndicator()
+            else
+              const SizedBox(height: 4),
+            if (_error != null) Text(_error!),
+            if (_selected.isNotEmpty)
+              ListTile(
+                title: Text('${_selected.length} selected'),
+                trailing: IconButton(
+                  tooltip: 'Clear selection',
+                  onPressed: _busy ? null : () => setState(_selected.clear),
+                  icon: const Icon(Icons.close),
+                ),
+              ),
+            Expanded(
+              child: Row(
+                children: [
+                  Expanded(
+                    flex: 3,
+                    child: Column(
+                      children: [
+                        _search(
+                          'Search files',
+                          (value) => setState(() => _sourceQuery = value),
+                        ),
+                        Expanded(
+                          child: source.isEmpty
+                              ? const Center(child: Text('No matching files'))
+                              : GridView.builder(
+                                  controller: _sourceScroll,
+                                  padding: const EdgeInsets.all(8),
+                                  gridDelegate:
+                                      const SliverGridDelegateWithMaxCrossAxisExtent(
+                                        maxCrossAxisExtent: 126,
+                                        mainAxisSpacing: 6,
+                                        crossAxisSpacing: 6,
+                                      ),
+                                  itemCount: source.length,
+                                  itemBuilder: (_, index) =>
+                                      _fileTile(source[index]),
+                                ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const VerticalDivider(width: 1),
+                  Expanded(
+                    flex: 2,
+                    child: Column(
+                      children: [
+                        TextButton.icon(
+                          onPressed: _busy
+                              ? null
+                              : () => _chooseFolder(destination: true),
+                          icon: const Icon(Icons.create_new_folder_outlined),
+                          label: const Text('Add folder'),
+                        ),
+                        _search(
+                          'Find folders',
+                          (value) => setState(() => _destinationQuery = value),
+                        ),
+                        Expanded(
+                          child: ListView(
+                            children: [
+                              for (final folder in destinations)
+                                DragTarget<String>(
+                                  onWillAcceptWithDetails: (_) => !_busy,
+                                  onAcceptWithDetails: (details) =>
+                                      _move(folder, details.data),
+                                  builder: (context, candidates, _) => ListTile(
+                                    selected: candidates.isNotEmpty,
+                                    dense: true,
+                                    title: Text(
+                                      folder.name,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    onTap: _busy ? null : () => _move(folder),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -259,353 +379,89 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildSelectionBar() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      color: const Color(0xFF1976D2),
-      child: Row(
-        children: [
-          Text(
-            '${selectedIndices.length} item${selectedIndices.length > 1 ? 's' : ''} selected',
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 15,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-          const Spacer(),
-          GestureDetector(
-            onTap: _clearSelection,
-            child: const Icon(Icons.close, color: Colors.white),
-          ),
-        ],
-      ),
-    );
-  }
+  Widget _search(String hint, ValueChanged<String> onChanged) => Padding(
+    padding: const EdgeInsets.all(8),
+    child: TextField(
+      onChanged: onChanged,
+      decoration: InputDecoration(hintText: hint, isDense: true),
+    ),
+  );
 
-  Widget _buildSourcePane() {
-    return Container(
-      color: Colors.white,
-      child: Column(
-        children: [
-          // Folder Header
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      currentPath.split('/').last,
-                      style: const TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    Text(
-                      '${files.length} items',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: Colors.grey.shade600,
-                      ),
-                    ),
-                  ],
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFE8F5E9),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: const Color(0xFFC8E6C9)),
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 8,
-                        height: 8,
-                        decoration: const BoxDecoration(
-                          color: Color(0xFF4CAF50),
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      const Text(
-                        'Organizer Mode',
-                        style: TextStyle(
-                          color: Color(0xFF2E7D32),
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          // File Grid
-          Expanded(
-            child: isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : files.isEmpty
-                    ? const Center(child: Text('No files'))
-                    : GridView.builder(
-                        padding: const EdgeInsets.all(12),
-                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 4,
-                          crossAxisSpacing: 8,
-                          mainAxisSpacing: 8,
-                          childAspectRatio: 0.85,
-                        ),
-                        itemCount: files.length,
-                        itemBuilder: (context, index) {
-                          final file = files[index];
-                          final isSelected = selectedIndices.contains(index);
-
-                          return GestureDetector(
-                            onTap: () {
-                              if (file.type == FileType.folder) {
-                                _navigateToFolder(file.path);
-                              } else {
-                                _toggleSelection(index);
-                              }
-                            },
-                            onLongPress: () {
-                              // Preview mode
-                              _showToast('Preview: ${file.name}');
-                            },
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 150),
-                              decoration: BoxDecoration(
-                                color: isSelected
-                                    ? const Color(0xFFE3F2FD)
-                                    : Colors.grey.shade100,
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: isSelected
-                                      ? const Color(0xFF1976D2)
-                                      : Colors.transparent,
-                                  width: 2,
-                                ),
-                              ),
-                              child: Stack(
-                                children: [
-                                  Column(
-                                    children: [
-                                      Expanded(
-                                        flex: 3,
-                                        child: Container(
-                                          margin: const EdgeInsets.all(4),
-                                          decoration: BoxDecoration(
-                                            color: _getFileColor(file.type).withOpacity(0.15),
-                                            borderRadius: BorderRadius.circular(8),
-                                          ),
-                                          child: Center(
-                                            child: Icon(
-                                              _getFileIcon(file.type),
-                                              size: 36,
-                                              color: _getFileColor(file.type),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                      Expanded(
-                                        flex: 1,
-                                        child: Padding(
-                                          padding: const EdgeInsets.symmetric(horizontal: 4),
-                                          child: Text(
-                                            file.name,
-                                            style: const TextStyle(
-                                              fontSize: 10,
-                                              color: Colors.black87,
-                                            ),
-                                            textAlign: TextAlign.center,
-                                            maxLines: 2,
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  if (isSelected)
-                                    Positioned(
-                                      top: 6,
-                                      left: 6,
-                                      child: Container(
-                                        width: 22,
-                                        height: 22,
-                                        decoration: const BoxDecoration(
-                                          color: Color(0xFF1976D2),
-                                          shape: BoxShape.circle,
-                                        ),
-                                        child: const Icon(
-                                          Icons.check,
-                                          color: Colors.white,
-                                          size: 14,
-                                        ),
-                                      ),
-                                    ),
-                                  if (file.type == FileType.video && file.duration != null)
-                                    Positioned(
-                                      bottom: 28,
-                                      right: 4,
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                                        decoration: BoxDecoration(
-                                          color: Colors.black54,
-                                          borderRadius: BorderRadius.circular(3),
-                                        ),
-                                        child: Text(
-                                          file.duration!,
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 9,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDestinationPane() {
-    return Container(
-      color: const Color(0xFFFAFAFA),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Padding(
-            padding: EdgeInsets.all(16),
-            child: Text(
-              'Destination',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          // Search Box
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                border: Border.all(color: Colors.grey.shade300),
-                borderRadius: BorderRadius.circular(24),
-              ),
-              child: Row(
-                children: [
-                  Icon(Icons.search, size: 18, color: Colors.grey.shade500),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Search folders...',
-                    style: TextStyle(
-                      color: Colors.grey.shade500,
-                      fontSize: 13,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          // Destination List
-          Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              itemCount: destinations.length,
-              itemBuilder: (context, index) {
-                final dest = destinations[index];
-                final isHighlighted = dest.name.toLowerCase() == 'images';
-
-                return GestureDetector(
-                  onTap: () => _moveToDestination(dest.path, dest.name),
-                  child: Container(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: isHighlighted
-                          ? const Color(0xFFE3F2FD)
-                          : Colors.white,
-                      border: Border.all(
-                        color: isHighlighted
-                            ? const Color(0xFF1976D2)
-                            : Colors.grey.shade300,
-                      ),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.folder_outlined,
-                          size: 22,
-                          color: isHighlighted
-                              ? const Color(0xFF1976D2)
-                              : Colors.grey.shade600,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            dest.name,
-                            style: TextStyle(
-                              fontSize: 14,
-                              color: Colors.grey.shade800,
-                            ),
-                          ),
-                        ),
-                        Icon(
-                          dest.name == 'More' ? Icons.keyboard_arrow_down : Icons.arrow_outward,
-                          size: 16,
-                          color: Colors.grey.shade400,
-                        ),
-                      ],
-                    ),
-                  ),
-                );
+  Widget _fileTile(FileItem file) {
+    final selected = _selected.contains(file.path);
+    final isFolder = file.type == FileType.folder;
+    final icon = Icon(_icon(file.type));
+    final tile = Card(
+      margin: EdgeInsets.zero,
+      color: selected ? Theme.of(context).colorScheme.primaryContainer : null,
+      child: InkWell(
+        onTap: _busy
+            ? null
+            : () {
+                if (isFolder) {
+                  _load(file.path);
+                } else {
+                  setState(() {
+                    if (selected) {
+                      _selected.remove(file.path);
+                    } else {
+                      _selected.add(file.path);
+                    }
+                  });
+                }
               },
+        onLongPress: _busy || isFolder ? null : () => _preview(file),
+        child: Column(
+          children: [
+            Expanded(
+              child: Center(
+                child: file.type == FileType.image
+                    ? Image.file(
+                        File(file.path),
+                        cacheWidth: 192,
+                        errorBuilder: (_, _, _) => icon,
+                      )
+                    : icon,
+              ),
             ),
-          ),
-        ],
+            Padding(
+              padding: const EdgeInsets.all(4),
+              child: Text(
+                file.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
       ),
     );
-  }
-
-  Widget _buildToast() {
-    return Positioned(
-      bottom: 24,
-      left: 0,
-      right: 0,
-      child: Center(
-        child: AnimatedOpacity(
-          opacity: showToast ? 1.0 : 0.0,
-          duration: const Duration(milliseconds: 300),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-            decoration: BoxDecoration(
-              color: Colors.black87,
-              borderRadius: BorderRadius.circular(24),
+    if (isFolder || _busy) return tile;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        tile,
+        Positioned(
+          top: 0,
+          right: 0,
+          child: Draggable<String>(
+            data: file.path,
+            feedback: Material(
+              child: Padding(
+                padding: const EdgeInsets.all(8),
+                child: Text(file.name),
+              ),
             ),
-            child: Text(
-              toastMessage ?? '',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 14,
+            child: const Tooltip(
+              message: 'Drag to a destination',
+              child: Padding(
+                padding: EdgeInsets.all(5),
+                child: Icon(Icons.drag_indicator, size: 17),
               ),
             ),
           ),
         ),
-      ),
+      ],
     );
   }
 }
